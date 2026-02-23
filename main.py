@@ -67,6 +67,7 @@ def get_args_parser():
     parser.add_argument('--cudnn-benchmark', action='store_true')
     parser.add_argument('--no-cudnn-benchmark', action='store_false', dest='cudnn_benchmark')
     parser.set_defaults(cudnn_benchmark=False)
+    parser.add_argument('--adapt-frontend', type=str, default=None, help="Layer of the frontend to adapt. Choose from 'filterbank' or 'compression'.")
 
     # Training parameters
     parser.add_argument('--batch-size', default=256, type=int)
@@ -118,6 +119,8 @@ def get_args_parser():
                         help='If and how to deal with incomplete evaluation chunks: "zero" for zero-padding, "drop" for omitting them (default), "overlap" for overlapping with the previous chunk')
     parser.add_argument('--eval-overlap', default=0, type=float,
                         help='Amount or fraction of overlap between consecutive evaluation chunks (default: %(default)s)')
+    parser.add_argument('--train-with-test', action='store_true',
+                        help='If given, train with the test set, otherwise only with the training set')
 
     # Saving parameters
     parser.add_argument('--save-best-model', default='loss', choices=['acc', 'loss'],
@@ -169,6 +172,8 @@ def get_args_parser():
                         help='run name for subdirectory in outputs/models and outputs/runs (may contain slashes)')
     return parser
 
+def check_args(args):
+    assert args.adapt_frontend in [None, 'compression', 'filterbank'], f"Cannot adapt layer {args.adapt_frontend}"
 
 def main(args):
     device = torch.device(args.device)
@@ -184,17 +189,17 @@ def main(args):
 
     ## init dataset and dataloader
     if args.data_set == 'CREMAD':
-        from datasets.crema_d import build_dataset
+        from dataset.crema_d import build_dataset
     if args.data_set == 'SPEECHCOMMANDS':
-        from datasets.speechcommands import build_dataset
+        from dataset.speechcommands import build_dataset
     if args.data_set == 'VOXFORGE':
-        from datasets.voxforge import build_dataset
+        from dataset.voxforge import build_dataset
     if args.data_set == 'NSYNTH_PITCH':
-        from datasets.nsynth import build_dataset_pitch as build_dataset
+        from dataset.nsynth import build_dataset_pitch as build_dataset
     if args.data_set == 'NSYNTH_INST':
-        from datasets.nsynth import build_dataset_inst as build_dataset
+        from dataset.nsynth import build_dataset_inst as build_dataset
     if args.data_set == 'BIRDCLEF2021':
-        from datasets.birdclef2021 import build_dataset
+        from dataset.birdclef2021 import build_dataset
 
     if args.data_set != 'None':
         train_loader, val_loader, test_loader, args.nb_classes = build_dataset(args=args)
@@ -263,15 +268,36 @@ def main(args):
         frontend=frontend,
         encoder=encoder)
     def criterion_and_optimizer(args, network):
+        ## Check if adapting/resuming
+        if args.adapt_frontend and not args.resume or not os.path.exists(args.resume):
+            print("WARNING: Attempting to adapt an untrained model! Recommended to train a model first before adaptation!!")
         ## init criterion, optimizer and set scheduler
         criterion = nn.CrossEntropyLoss(reduction='none')
+        
+        ## freeze parameters not in adaptation layer
+        if args.adapt_frontend:
+            layer_to_keep = network.frontend.getattr(args.adapt_frontend, None)
+            if not layer_to_keep:
+                raise ValueError(f"Frontend {type(network.frontend)} has no attribute {args.adapt_frontend}")
+            for param in network.parameters():
+                param.requires_grad = False
+            for param in layer_to_keep.parameters():
+                param.requires_grad = True
+                
         if args.frontend_lr_factor == 1:
             params = network.parameters()
+            frontend_params = None
         else:
             frontend_params = list(network._frontend.parameters())
             frontend_paramids = set(id(p) for p in frontend_params)
             params = [p for p in network.parameters()
                       if id(p) not in frontend_paramids]
+            
+        # filter out frozen parameters
+        params = filter(lambda p: p.requires_grad, params)
+        if frontend_params:
+            frontend_params = filter(lambda p: p.requires_grad, frontend_params)
+        
         optimizer = torch.optim.Adam(params, lr=args.lr, eps=args.adam_eps)
         if args.frontend_lr_factor != 1:
             optimizer.add_param_group(dict(
@@ -369,6 +395,7 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('Torch Leaf Trainings Script', parents=[get_args_parser()])
     args = parser.parse_args()
+    check_args(args)
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)

@@ -21,6 +21,7 @@ class AudioClassifier(torch.nn.Module):
             torch.nn.Flatten()
         )
         self._head = torch.nn.Linear(in_features=1280, out_features=num_outputs)
+        self.layers = [self._frontend, self._encoder, self._pool, self._head]
         #self._head = torch.nn.LazyLinear(out_features=num_outputs)
 
     def forward(self, inputs: torch.Tensor):
