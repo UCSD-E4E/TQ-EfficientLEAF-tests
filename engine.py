@@ -206,15 +206,17 @@ def train(network, loader_train, loader_val, loader_test, path,
     best_loss_val = None
     best_acc_val = None
     
+    print("TRAINING LOOP START")
     #training loop
     for epoch in range(start, num_epochs + 1):
         #log frontend output in Tensorboard
+        fe_example = compute_frontend_example(network, loader_val)[:16].cpu()
+        grid = make_grid(fe_example,
+                          normalize=True)
         if getattr(network, '_frontend', None):
             writer.add_image(
                 "frontend",
-                make_grid(compute_frontend_example(network,
-                                                   loader_val)[:16].cpu(),
-                          normalize=True),
+                grid,
                 epoch)
 
         #train, test, evaluate

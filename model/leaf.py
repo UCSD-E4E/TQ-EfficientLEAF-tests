@@ -42,7 +42,7 @@ def gabor_filters(size: int, center_freqs: torch.Tensor,
     t = torch.arange(-(size // 2), (size + 1) // 2, device=center_freqs.device)
     denominator = 1. / (np.sqrt(2 * np.pi) * sigmas)
     gaussian = torch.exp(torch.outer(1. / (2. * sigmas**2), -t**2))
-    sinusoid = torch.exp(1j * torch.outer(center_freqs, t))
+    sinusoid = torch.exp(1j * torch.outer(center_freqs, t)) ## Error!
     return denominator[:, np.newaxis] * sinusoid * gaussian
 
 

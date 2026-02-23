@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
 """
-Training and testing script for LEAF, EfficientLEAF and a fixed mel filterbank.
-Run with --help for command line options.
-See experiments.sh for a listing of all experiments published in the
-EfficientLEAF paper.
-
-Author: Gerald Gutenbrunner, Jan Schlüter
+Script to adapt the PCEN layer of an EfficientLEAF model to a new dataset.
 """
 # imports
 ## builtin
@@ -44,8 +39,6 @@ window_stride = 10.0
 min_freq = 60.0
 max_freq = 7800.0
 
-
-# Arg Parser Function
 def get_args_parser():
     parser = argparse.ArgumentParser('Leaf training and evaluation script', add_help=False)
 
@@ -169,7 +162,6 @@ def get_args_parser():
                         help='run name for subdirectory in outputs/models and outputs/runs (may contain slashes)')
     return parser
 
-
 def main(args):
     device = torch.device(args.device)
 
@@ -198,177 +190,11 @@ def main(args):
 
     if args.data_set != 'None':
         train_loader, val_loader, test_loader, args.nb_classes = build_dataset(args=args)
-
-    ## init encoder
-    if args.compression == 'TBN' and args.tbn_median_filter and args.tbn_median_filter_append:
-        frontend_channels = 2
-    else:
-        frontend_channels = 1
-    encoder = EfficientNet.from_name("efficientnet-b0", num_classes=args.nb_classes, include_top=False,
-                                     in_channels=frontend_channels)
-    encoder._avg_pooling = torch.nn.Identity()
-
-    ## init compression layer
-    if args.compression == 'PCEN':
-        compression_fn = PCEN(num_bands=n_filters,
-                              s=0.04,
-                              alpha=0.96,
-                              delta=2.0,
-                              r=0.5,
-                              eps=1e-12,
-                              learn_logs=args.pcen_learn_logs,
-                              clamp=1e-5)
-    elif args.compression == 'TBN':
-        compression_fn = LogTBN(num_bands=n_filters,
-                                a=args.log1p_initial_a,
-                                trainable=args.log1p_trainable,
-                                per_band=args.log1p_per_band,
-                                median_filter=args.tbn_median_filter,
-                                append_filtered=args.tbn_median_filter_append)
-
-    ## init frontend
-    if args.frontend == 'Leaf':
-        frontend = Leaf(n_filters=n_filters,
-                        min_freq=min_freq,
-                        max_freq=max_freq,
-                        sample_rate=sample_rate,
-                        window_len=window_len,
-                        window_stride=window_stride,
-                        compression=compression_fn)
-    elif args.frontend == 'EfficientLeaf':
-        frontend = EfficientLeaf(n_filters=n_filters,
-                                 num_groups=args.num_groups,
-                                 min_freq=min_freq,
-                                 max_freq=max_freq,
-                                 sample_rate=sample_rate,
-                                 window_len=window_len,
-                                 window_stride=window_stride,
-                                 conv_win_factor=args.conv_win_factor,
-                                 stride_factor=args.stride_factor,
-                                 compression=compression_fn)
-    elif args.frontend == 'Mel':
-        window_size = int(sample_rate * window_len / 1000 + 1)  # to match Leaf
-        hop_size = int(sample_rate * window_stride / 1000 + 1)
-        frontend = nn.Sequential(OrderedDict([
-            ('stft', STFT(window_size, hop_size, complex=False)),
-            ('filterbank', MelFilter(sample_rate, window_size, n_filters,
-                                     min_freq, max_freq)),
-            ('squeeze', Squeeze(dim=1)),  # remove channel dim to match Leaf
-            ('compression', compression_fn),
-        ]))
-
-    ## init classifier
-    network = AudioClassifier(
-        num_outputs=args.nb_classes,
-        frontend=frontend,
-        encoder=encoder)
-    def criterion_and_optimizer(args, network):
-        ## init criterion, optimizer and set scheduler
-        criterion = nn.CrossEntropyLoss(reduction='none')
-        if args.frontend_lr_factor == 1:
-            params = network.parameters()
-        else:
-            frontend_params = list(network._frontend.parameters())
-            frontend_paramids = set(id(p) for p in frontend_params)
-            params = [p for p in network.parameters()
-                      if id(p) not in frontend_paramids]
-        optimizer = torch.optim.Adam(params, lr=args.lr, eps=args.adam_eps)
-        if args.frontend_lr_factor != 1:
-            optimizer.add_param_group(dict(
-                params=frontend_params,
-                lr=args.lr * args.frontend_lr_factor))
-
-        ## lr scheduler
-        if args.scheduler:
-            args.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer,
-                mode='max' if args.scheduler_mode == 'acc' else 'min',
-                factor=args.scheduler_factor,
-                patience=args.patience)
-        else:
-            args.scheduler = None
-
-        return args, criterion, optimizer
-
-    if not args.resume or not os.path.exists(args.resume):
-        args, criterion, optimizer = criterion_and_optimizer(args, network)
-
-    ## load previous run
-    if args.resume and not os.path.exists(args.resume):
-        print("resume file %s does not exist; ignoring" % args.resume)
-
-    if args.resume and os.path.exists(args.resume):
-        saved_dict = torch.load(args.resume, map_location=torch.device('cpu'))
-        network.load_state_dict(saved_dict['network'])
-        args, criterion, optimizer = criterion_and_optimizer(args, network)
-        args.start_epoch = saved_dict['epoch'] + 1
-        optimizer.load_state_dict(saved_dict['optimizer'])
-        if args.scheduler is not None and saved_dict['scheduler'] is not None:
-            args.scheduler.load_state_dict(saved_dict['scheduler'])
-        del saved_dict
-
-    ## move network and optim to device
-    network.to(device)
-    torch.cuda.empty_cache()
-    optimizer_to(optimizer, device)
-    scheduler_to(args.scheduler, device)
-    # return network if wanted
-    if args.ret_network:
-        if args.data_set != "None":
-            return network, train_loader, val_loader, test_loader
-        else:
-            return network
-
-    ## save args for this experiment
-    model_dir = os.path.join(args.output_dir, 'models', args.model_name)
-    os.makedirs(model_dir, exist_ok=True)
-    with open(os.path.join(model_dir, 'args.txt'), 'w') as f:
-        f.writelines('%s=%s\n' % (k, v) for k, v in vars(args).items())
-
-    if args.frontend_benchmark and getattr(network, '_frontend', None):
-        print("train: %d, valid: %d, test: %d" % (len(train_loader.dataset), len(val_loader.dataset.dataset), len(test_loader.dataset.dataset)))
-        print("Performing frontend training benchmark...")
-        batch, *_ = next(iter(val_loader))
-        batch_size = batch.shape[0]
-        batch = batch.to(device)
-
-        network.train()
-        #warmup
-        for i in tqdm(range(args.benchmark_runs // 10), 'Warmup'):
-            network._frontend(batch).sum().backward()
-        #perform benchmark
-        torch.cuda.synchronize()
-        start = time.time()
-        for i in tqdm(range(args.benchmark_runs), 'Benchmark'):
-            network._frontend(batch).sum().backward()
-        torch.cuda.synchronize()
-        end = time.time()
-
-        #calculate stats
-        time_elpsd = end - start
-        sap_per_sec = args.benchmark_runs * batch_size / time_elpsd
-        print('Time Elapsed:', time_elpsd)
-        print('Samples/Sec:', sap_per_sec)
-
-        #save into model_path\benchmark_time.txt
-        model_path = os.path.join(args.output_dir, 'models', args.model_name)
-        if not os.path.isdir(os.path.join(args.output_dir, 'models')): os.mkdir(os.path.join(args.output_dir, 'models'))
-        if not os.path.isdir(model_path): os.mkdir(model_path)
-        with open(os.path.join(model_path, "benchmark_time.txt"), 'w') as f:
-            f.write('time={}\nsamples_per_sec={}'.format(time_elpsd, sap_per_sec))
-    else:
-        train(network=network, loader_train=train_loader, loader_val=val_loader, loader_test=test_loader,
-              path=args.output_dir, criterion=criterion, optimizer=optimizer, num_epochs=args.epochs, tqdm_on=True,
-              overwrite_save=args.overwrite_save, save_every=args.save_every, starting_epoch=args.start_epoch,
-              test_every_epoch=args.test_every_epoch,
-              scheduler=args.scheduler, scheduler_item=args.scheduler_mode, scheduler_min_lr=args.min_lr,
-              warmup_steps=args.warmup_steps,
-              save_best_model=args.save_best_model, model_name=args.model_name)
-
+        
+    
+    pass
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser('Torch Leaf Trainings Script', parents=[get_args_parser()])
+    parser = argparse.ArgumentParser('PCEN adaptation script', parents=[get_args_parser()])
     args = parser.parse_args()
-    if args.output_dir:
-        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)
