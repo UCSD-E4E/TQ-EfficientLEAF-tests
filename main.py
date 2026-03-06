@@ -12,6 +12,7 @@ Author: Gerald Gutenbrunner, Jan Schlüter
 import argparse
 import time
 import os
+import re
 from pathlib import Path
 from collections import OrderedDict
 
@@ -67,7 +68,8 @@ def get_args_parser():
     parser.add_argument('--cudnn-benchmark', action='store_true')
     parser.add_argument('--no-cudnn-benchmark', action='store_false', dest='cudnn_benchmark')
     parser.set_defaults(cudnn_benchmark=False)
-    parser.add_argument('--adapt-frontend', type=str, default=None, help="Layer of the frontend to adapt. Choose from 'filterbank' or 'compression'.")
+    parser.add_argument('--adapt-frontend', type=str, default=None, choices=[None, 'compression', 'filterbank'],
+                        help="Layer of the frontend to adapt. Choose from 'filterbank' or 'compression'.")
 
     # Training parameters
     parser.add_argument('--batch-size', default=256, type=int)
@@ -107,7 +109,7 @@ def get_args_parser():
     # Dataset parameters
     parser.add_argument('--data-path', default='', type=str,
                         help='path below which to store the datasets (defaults to current directory)')
-    parser.add_argument('--data-set', default='SPEECHCOMMANDS', choices=['SPEECHCOMMANDS', 'CREMAD', 'VOXFORGE', 'NSYNTH_PITCH', 'NSYNTH_INST', 'BIRDCLEF2021', 'None'],
+    parser.add_argument('--data-set', default='SPEECHCOMMANDS',
                         type=str, help='Which dataset to use. "None" does not load any dataset; used with --ret-network to return a network without dataloaders.')
     parser.add_argument('--num_workers', default=0, type=int)
     parser.add_argument('--pin-mem', action='store_true',
@@ -190,20 +192,22 @@ def main(args):
     ## init dataset and dataloader
     if args.data_set == 'CREMAD':
         from dataset.crema_d import build_dataset
-    if args.data_set == 'SPEECHCOMMANDS':
+    elif args.data_set == 'SPEECHCOMMANDS':
         from dataset.speechcommands import build_dataset
-    if args.data_set == 'VOXFORGE':
+    elif args.data_set == 'VOXFORGE':
         from dataset.voxforge import build_dataset
-    if args.data_set == 'NSYNTH_PITCH':
+    elif args.data_set == 'NSYNTH_PITCH':
         from dataset.nsynth import build_dataset_pitch as build_dataset
-    if args.data_set == 'NSYNTH_INST':
+    elif args.data_set == 'NSYNTH_INST':
         from dataset.nsynth import build_dataset_inst as build_dataset
-    if args.data_set == 'BIRDCLEF2021':
+    elif args.data_set == 'BIRDCLEF2021':
         from dataset.birdclef2021 import build_dataset
+    elif re.match(r'BIRDSET_(.*)', args.data_set):
+        from dataset.birdset import build_dataset
 
     if args.data_set != 'None':
         train_loader, val_loader, test_loader, args.nb_classes = build_dataset(args=args)
-
+    # exit()
     ## init encoder
     if args.compression == 'TBN' and args.tbn_median_filter and args.tbn_median_filter_append:
         frontend_channels = 2
@@ -269,14 +273,14 @@ def main(args):
         encoder=encoder)
     def criterion_and_optimizer(args, network):
         ## Check if adapting/resuming
-        if args.adapt_frontend and not args.resume or not os.path.exists(args.resume):
+        if args.adapt_frontend and (not args.resume or not os.path.exists(args.resume)):
             print("WARNING: Attempting to adapt an untrained model! Recommended to train a model first before adaptation!!")
         ## init criterion, optimizer and set scheduler
         criterion = nn.CrossEntropyLoss(reduction='none')
         
         ## freeze parameters not in adaptation layer
         if args.adapt_frontend:
-            layer_to_keep = network.frontend.getattr(args.adapt_frontend, None)
+            layer_to_keep = getattr(network._frontend, args.adapt_frontend, None)
             if not layer_to_keep:
                 raise ValueError(f"Frontend {type(network.frontend)} has no attribute {args.adapt_frontend}")
             for param in network.parameters():
@@ -328,11 +332,12 @@ def main(args):
         network.load_state_dict(saved_dict['network'])
         args, criterion, optimizer = criterion_and_optimizer(args, network)
         args.start_epoch = saved_dict['epoch'] + 1
-        optimizer.load_state_dict(saved_dict['optimizer'])
+        if not args.adapt_frontend:
+            optimizer.load_state_dict(saved_dict['optimizer'])
         if args.scheduler is not None and saved_dict['scheduler'] is not None:
             args.scheduler.load_state_dict(saved_dict['scheduler'])
         del saved_dict
-
+    # exit()
     ## move network and optim to device
     network.to(device)
     torch.cuda.empty_cache()
