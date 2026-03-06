@@ -43,10 +43,13 @@ def _forward(network, data_loader, criterion):
     device = next(network.parameters()).device
 
     for batch, y_true in data_loader:
+        y_true = y_true.type(torch.LongTensor)
         batch, y_true = batch.to(device), y_true.to(device)
         logits = network(batch)
+        # print("DATA TYPES:", logits.dtype, y_true.dtype)
         loss = criterion(logits, y_true).mean()
-
+        # print("SUCCESS")
+        # exit()
         del y_true
         yield loss
 
@@ -56,6 +59,7 @@ def _forward_eval(network, data_loader, criterion, acc_criterion=accuracy):
 
     def unbatched_predictions():
         for batch, y_true, ids in data_loader:
+            y_true = y_true.type(torch.LongTensor)
             batch, y_true = batch.to(device), y_true.to(device)
             logits = network(batch)
             losses = criterion(logits, y_true.to(device))
@@ -206,7 +210,8 @@ def train(network, loader_train, loader_val, loader_test, path,
     best_loss_val = None
     best_acc_val = None
     
-    print("TRAINING LOOP START")
+    print("TRAINING LOOP START ON DEVICE", next(network.parameters()).device)
+    # exit()
     #training loop
     for epoch in range(start, num_epochs + 1):
         #log frontend output in Tensorboard
@@ -252,7 +257,8 @@ def train(network, loader_train, loader_val, loader_test, path,
             for name, weight in network._frontend.named_parameters():
                 try:
                     writer.add_histogram(name, weight, epoch)
-                    writer.add_histogram(f'{name}.grad',weight.grad, epoch)
+                    if weight.grad is not None:
+                        writer.add_histogram(f'{name}.grad',weight.grad, epoch)
                 except ValueError:
                     pass
 
