@@ -15,6 +15,7 @@ import soundfile as sf
 
 #torch
 import torch
+from torch.nn import functional as F
 from torch.utils.data import Dataset
 from datasets import load_dataset
 
@@ -35,7 +36,8 @@ def check_wav(path, sr=None):
     return str(path.with_suffix(".wav")) 
 class BirdSet(Dataset):
     def __init__(self, region, split='train', seed=0, sample_rate=16000,
-                 fixed_crop=None, random_crop=None, indices=None):
+                 fixed_crop=None, random_crop=None, indices=None,
+                 multilabel=False, n_classes=None):
         #same seed for train and test(!)
         # assert split == 'test' or split == 'train' or split == 'validation', 'split must be "train", "validation" or "test"'
         
@@ -48,27 +50,35 @@ class BirdSet(Dataset):
         self.sample_rate = sample_rate
         self.fixed_crop = fixed_crop
         self.random_crop = random_crop
+        self.multilabel = multilabel
         
         self.filenames = np.array([])
-        self.labels = np.array([])
+        self.labels = []
         self.label_mapping = label_mapping
         
         # fill filenames and labels
         for item in self.dataset:
             self.filenames = np.append(self.filenames, item['filepath'])
-            label = item['ebird_code']
-            if label not in label_mapping:
-                label_mapping[label] = len(label_mapping)
-            self.labels = np.append(self.labels, label_mapping[label])
-            
+            if multilabel:
+                label = item['ebird_code_multilabel']
+            else:
+                label = [item['ebird_code']]
+            self.labels.append(label)
+        # print("LABELS SHAPE:", self.labels.shape)
         if indices is not None:
-            self.labels = self.labels[indices]
+            self.labels = [self.labels[i] for i in indices]
             self.filenames = self.filenames[indices]
+        self.labels = np.array(self.labels, dtype='object')
             
         self.windows = np.array(list(zip(self.dataset['start_time'], self.dataset['end_time'])))
-        
-        self.labels = torch.tensor(self.labels) # must convert label list to tensor for torch
-        self.n_classes = len(self.labels.unique())
+        # print("LABELS:", self.labels)
+        self.n_classes = n_classes or len(
+            np.unique(
+                [label 
+                 for multilabel in self.labels
+                 for label in multilabel]
+            )
+        )
     
     def split_dataset(self, n_splits=2, props=[0.7, 0.3]):
         if not np.isclose(sum(props), 1.0):
@@ -85,7 +95,9 @@ class BirdSet(Dataset):
         
         set_indices = np.split(dataset_indices, split_indices)
         return [BirdSet(region=None, split=self.split, seed=self.seed, sample_rate=self.sample_rate,
-                        fixed_crop=self.fixed_crop, random_crop=self.random_crop, indices=idx) for idx in set_indices]
+                        fixed_crop=self.fixed_crop, random_crop=self.random_crop, indices=idx,
+                        multilabel=self.multilabel, n_classes=self.n_classes) 
+                for idx in set_indices]
         
     def stratify(self, size=-1, replace=True) -> None:
         """
@@ -98,13 +110,17 @@ class BirdSet(Dataset):
         assert (size < len(self)) or replace, "Cannot sample a larger dataset without replacement."
         if size < 0:
             size = len(self)
-        assert (size > self.n_classes), "Result must contain at least one example per class."
+        # assert (size > self.n_classes), "Result must contain at least one example per class."
         
         samples_per_class = size // self.n_classes
         
         class_indices = defaultdict(list)
-        for i, label in enumerate(self.labels):
-            class_indices[label.item()].append(i)
+        for i, multilabel in enumerate(self.labels):
+            if len(multilabel) > 0:
+                for label in multilabel:
+                    class_indices[label].append(i)
+            else:
+                class_indices[-1].append(i)
 
         stratified_indices = []
         for indices in class_indices.values():
@@ -129,9 +145,13 @@ class BirdSet(Dataset):
             raise ValueError(f"File {path} not found")
         try:
             _, audio = wav_read(path, mmap=True)
+            
         except Exception as e:
             print("Error reading file: ", path)
             raise e
+        window = self.windows[idx]
+        if window[0] and window[1]:
+            audio = audio[int(window[0]*self.sample_rate) : int(window[1]*self.sample_rate)]
         if self.fixed_crop:
             audio = audio[:self.fixed_crop]
         if self.random_crop:
@@ -149,23 +169,31 @@ class BirdSet(Dataset):
         if not np.issubdtype(audio.dtype, np.floating):
             audio = np.divide(audio, np.iinfo(audio.dtype).max, dtype=np.float32)
         audio = torch.as_tensor(audio, dtype=torch.float32)
-        window = self.windows[idx]
-        audio = audio[window[0] * self.sample_rate : window[1]*self.sample_rate]
-        label = self.labels[idx]
+        
+        label = torch.tensor(self.labels[idx])
+        # print("Label:", label)
+        if len(label) > 0:
+            label = F.one_hot(label, num_classes=self.n_classes).sum(dim=0)
+        else:
+            label = torch.zeros(self.n_classes, dtype=torch.int64)
 
         return audio, label
     
 def build_dataset(args):
+    nb_classes = 397
     region = re.findall(r'BIRDSET_(.+)', args.data_set)[0]
     if args.train_with_test:
-        test_set = BirdSet(region=region, split='test', seed=0, sample_rate=16000)
+        test_set = BirdSet(region=region, split='test_5s', seed=0, sample_rate=16000, 
+                           multilabel=True, n_classes=nb_classes)
         train_set, test_set, val_set = test_set.split_dataset(n_splits=3, props=[0.5, 0.1, 0.4])
     else:
         # test on full recordings
-        test_set = BirdSet(region=region, split='test', seed=0, sample_rate=16000)
+        test_set = BirdSet(region=region, split='test_5s', seed=0, sample_rate=16000, 
+                           multilabel=True, n_classes=nb_classes)
         # train on random excerpt (args.input_size)
-        train_set = BirdSet(region=region, split='train', seed=0, sample_rate=16000, random_crop=args.input_size)
-        print(type(train_set))
+        train_set = BirdSet(region=region, split='train', seed=0, sample_rate=16000, random_crop=args.input_size, 
+                            multilabel=False, n_classes=nb_classes)
+        # print(type(train_set))
         train_set, val_set = train_set.split_dataset(n_splits=2, props=[0.7, 0.3])
         # validate on first 16 seconds
     val_set.fixed_crop = 16*16000
@@ -176,5 +204,4 @@ def build_dataset(args):
     train_loader, val_loader, test_loader = build_dataloaders(
         train_set, val_set, test_set,
         label_transform_fn=None, args=args)
-    nb_classes = 397
     return train_loader, val_loader, test_loader, nb_classes

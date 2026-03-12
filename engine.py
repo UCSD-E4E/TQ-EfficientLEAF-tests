@@ -44,12 +44,12 @@ def _forward(network, data_loader, criterion):
 
     for batch, y_true in data_loader:
         y_true = y_true.type(torch.LongTensor)
+        # print("Y TRUE:", y_true)
         batch, y_true = batch.to(device), y_true.to(device)
         logits = network(batch)
         # print("DATA TYPES:", logits.dtype, y_true.dtype)
-        loss = criterion(logits, y_true).mean()
+        loss = criterion(logits, y_true.float()).mean()
         # print("SUCCESS")
-        # exit()
         del y_true
         yield loss
 
@@ -62,7 +62,7 @@ def _forward_eval(network, data_loader, criterion, acc_criterion=accuracy):
             y_true = y_true.type(torch.LongTensor)
             batch, y_true = batch.to(device), y_true.to(device)
             logits = network(batch)
-            losses = criterion(logits, y_true.to(device))
+            losses = criterion(logits, y_true.to(device).float())
             yield from zip(ids, logits, losses, y_true)
 
     def aggregated_by_id():
@@ -85,7 +85,7 @@ def evaluate(network, data_loader, criterion, tqdm_batch=None):
     network.eval()
     if tqdm_batch is not None: tqdm_batch.reset()
     for loss, acc in _forward_eval(network, data_loader, criterion):
-        losses.append(float(loss.item()))
+        losses.append(float(loss.mean().item()))
         accs.append(float(acc.item()))
         if tqdm_batch is not None: tqdm_batch.update()
     if tqdm_batch is not None: tqdm_batch.refresh()

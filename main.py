@@ -278,7 +278,7 @@ def main(args):
         if args.adapt_frontend and (not args.resume or not os.path.exists(args.resume)):
             print("WARNING: Attempting to adapt an untrained model! Recommended to train a model first before adaptation!!")
         ## init criterion, optimizer and set scheduler
-        criterion = nn.CrossEntropyLoss(reduction='none')
+        criterion = nn.BCEWithLogitsLoss(reduction='none')
         
         ## freeze parameters not in adaptation layer
         if args.adapt_frontend:
