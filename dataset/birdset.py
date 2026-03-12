@@ -4,6 +4,7 @@ import os
 import warnings
 import re
 from pathlib import Path
+from collections import defaultdict
 
 #processing
 from scipy.io.wavfile import read as wav_read
@@ -22,13 +23,14 @@ from . import (_compute_split_boundaries, _get_inter_splits_by_group,
                build_dataloaders)
 label_mapping = {}
 
-def check_wav(path):
+def check_wav(path, sr=None):
     """
     If .wav does not exist for path, write it
     """
     path = Path(path)
     if not path.with_suffix(".wav").exists():
-        audio, sr = load(str(path))
+        audio, loaded_sr = load(str(path))
+        sr = sr or loaded_sr
         sf.write(str(path.with_suffix(".wav")), audio, sr)
     return str(path.with_suffix(".wav")) 
 class BirdSet(Dataset):
@@ -62,8 +64,11 @@ class BirdSet(Dataset):
         if indices is not None:
             self.labels = self.labels[indices]
             self.filenames = self.filenames[indices]
+            
+        self.windows = np.array(list(zip(self.dataset['start_time'], self.dataset['end_time'])))
         
         self.labels = torch.tensor(self.labels) # must convert label list to tensor for torch
+        self.n_classes = len(self.labels.unique())
     
     def split_dataset(self, n_splits=2, props=[0.7, 0.3]):
         if not np.isclose(sum(props), 1.0):
@@ -82,15 +87,44 @@ class BirdSet(Dataset):
         return [BirdSet(region=None, split=self.split, seed=self.seed, sample_rate=self.sample_rate,
                         fixed_crop=self.fixed_crop, random_crop=self.random_crop, indices=idx) for idx in set_indices]
         
+    def stratify(self, size=-1, replace=True) -> None:
+        """
+        Stratifies the dataset by class.
+        Args:
+            size (int): Size of the resulting dataset. Will be the closest multiple of n_classes that is less than size. Defaults to len(self).
+            replace (bool): Whether or not to sample with replacement. Defaults to True.
+        """
+        np.random.seed(self.seed)
+        assert (size < len(self)) or replace, "Cannot sample a larger dataset without replacement."
+        if size < 0:
+            size = len(self)
+        assert (size > self.n_classes), "Result must contain at least one example per class."
         
+        samples_per_class = size // self.n_classes
         
-    
+        class_indices = defaultdict(list)
+        for i, label in enumerate(self.labels):
+            class_indices[label.item()].append(i)
+
+        stratified_indices = []
+        for indices in class_indices.values():
+            stratified_indices.extend(
+                np.random.choice(indices, 
+                                    size=samples_per_class,
+                                    replace=True
+                                )
+                )
+        np.random.shuffle(stratified_indices)
+        self.labels = self.labels[stratified_indices]
+        self.filenames = self.filenames[stratified_indices]
+        self.windows = self.windows[stratified_indices]
+        
     def __len__(self):
         return len(self.filenames)
 
     def __getitem__(self, idx):
         path = self.filenames[idx]
-        path = check_wav(path)
+        path = check_wav(path, sr=self.sample_rate)
         if not os.path.exists(path):
             raise ValueError(f"File {path} not found")
         try:
@@ -115,6 +149,8 @@ class BirdSet(Dataset):
         if not np.issubdtype(audio.dtype, np.floating):
             audio = np.divide(audio, np.iinfo(audio.dtype).max, dtype=np.float32)
         audio = torch.as_tensor(audio, dtype=torch.float32)
+        window = self.windows[idx]
+        audio = audio[window[0] * self.sample_rate : window[1]*self.sample_rate]
         label = self.labels[idx]
 
         return audio, label
@@ -133,6 +169,9 @@ def build_dataset(args):
         train_set, val_set = train_set.split_dataset(n_splits=2, props=[0.7, 0.3])
         # validate on first 16 seconds
     val_set.fixed_crop = 16*16000
+    
+    if args.stratify:
+        train_set.stratify()
     
     train_loader, val_loader, test_loader = build_dataloaders(
         train_set, val_set, test_set,

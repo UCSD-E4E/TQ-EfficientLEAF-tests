@@ -123,6 +123,8 @@ def get_args_parser():
                         help='Amount or fraction of overlap between consecutive evaluation chunks (default: %(default)s)')
     parser.add_argument('--train-with-test', action='store_true',
                         help='If given, train with the test set, otherwise only with the training set')
+    parser.add_argument('--stratify', action='store_true',
+                        help='If given, stratify training dataset by class and bootstrap (with replacement).')
 
     # Saving parameters
     parser.add_argument('--save-best-model', default='loss', choices=['acc', 'loss'],
