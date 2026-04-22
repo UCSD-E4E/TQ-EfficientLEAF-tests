@@ -70,6 +70,8 @@ def get_args_parser():
     parser.set_defaults(cudnn_benchmark=False)
     parser.add_argument('--adapt-frontend', type=str, default=None, choices=[None, 'compression', 'filterbank'],
                         help="Layer of the frontend to adapt. Choose from 'filterbank' or 'compression'.")
+    parser.add_argument('--freeze-backend', action='store_true',
+                        help="Freeze backend (encoder and classification head) weights and only train frontend.")
 
     # Training parameters
     parser.add_argument('--batch-size', default=256, type=int)
@@ -285,10 +287,15 @@ def main(args):
             layer_to_keep = getattr(network._frontend, args.adapt_frontend, None)
             if not layer_to_keep:
                 raise ValueError(f"Frontend {type(network.frontend)} has no attribute {args.adapt_frontend}")
-            for param in network.parameters():
+            for param in network._frontend.parameters():
                 param.requires_grad = False
             for param in layer_to_keep.parameters():
                 param.requires_grad = True
+        if args.freeze_backend:
+            for param in network._encoder.parameters():
+                param.requires_grad = False
+            for param in network._head.parameters():
+                param.requires_grad = False
                 
         if args.frontend_lr_factor == 1:
             params = network.parameters()
