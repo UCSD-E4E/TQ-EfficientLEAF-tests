@@ -110,9 +110,6 @@ class BirdSet(Dataset):
         assert (size < len(self)) or replace, "Cannot sample a larger dataset without replacement."
         if size < 0:
             size = len(self)
-        # assert (size > self.n_classes), "Result must contain at least one example per class."
-        
-        samples_per_class = size // self.n_classes
         
         class_indices = defaultdict(list)
         for i, multilabel in enumerate(self.labels):
@@ -121,15 +118,22 @@ class BirdSet(Dataset):
                     class_indices[label].append(i)
             else:
                 class_indices[-1].append(i)
-
+        
+        # keep all no-bird samples; stratify remaining        
+        assert (size > len(class_indices)), "Result must contain at least one example per class."
+        samples_per_class = (size - len(class_indices[-1])) // (len(class_indices) - 1)
+        
         stratified_indices = []
-        for indices in class_indices.values():
-            stratified_indices.extend(
-                np.random.choice(indices, 
-                                    size=samples_per_class,
-                                    replace=True
-                                )
-                )
+        for label, indices in class_indices.items():
+            if label == -1:
+                stratified_indices.extend(indices)
+            else:
+                stratified_indices.extend(
+                    np.random.choice(indices, 
+                                        size=samples_per_class,
+                                        replace=replace
+                                    )
+                    )
         np.random.shuffle(stratified_indices)
         self.labels = self.labels[stratified_indices]
         self.filenames = self.filenames[stratified_indices]
@@ -170,7 +174,7 @@ class BirdSet(Dataset):
             audio = np.divide(audio, np.iinfo(audio.dtype).max, dtype=np.float32)
         audio = torch.as_tensor(audio, dtype=torch.float32)
         
-        label = torch.tensor(self.labels[idx])
+        label = torch.tensor(list(self.labels[idx]))
         # print("Label:", label)
         if len(label) > 0:
             label = F.one_hot(label, num_classes=self.n_classes).sum(dim=0)
