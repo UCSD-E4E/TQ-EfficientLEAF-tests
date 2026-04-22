@@ -32,6 +32,8 @@ class STFT(nn.Module):
     def forward(self, x):
         # we want each channel to be treated separately, so we mash
         # up the channels and batch size and split them up afterwards
+        while x.ndim < 3:
+            x = x[:, np.newaxis]
         batchsize, channels = x.shape[:2]
         x = x.reshape((-1,) + x.shape[2:])
         # we apply the STFT
